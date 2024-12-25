@@ -52,13 +52,16 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Upload configuration
-app.config['UPLOAD_FOLDER'] = os.path.join(app.static_folder, 'pictures')
+app.config['UPLOAD_FOLDER'] = os.path.join(app.static_folder, 'uploads')
+app.config['PICTURES_FOLDER'] = os.path.join(app.static_folder, 'pictures')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'doc', 'docx'}
 
 # Create upload directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'items'), exist_ok=True)
+os.makedirs(app.config['PICTURES_FOLDER'], exist_ok=True)
+os.makedirs(os.path.join(app.config['PICTURES_FOLDER'], 'items'), exist_ok=True)
 
 db.init_app(app)
 
@@ -210,7 +213,7 @@ def get_or_create_items():
             result = []
             for item in items:
                 # Get item files
-                type_folder = secure_filename(item.item_type.name.lower())
+                type_folder = normalize_filename(item.item_type.name)
                 item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item.id)
                 files = []
                 if os.path.exists(item_folder):
@@ -231,7 +234,8 @@ def get_or_create_items():
                     } if item.location else None,
                     'item_type': {
                         'id': item.item_type.id,
-                        'name': item.item_type.name
+                        'name': item.item_type.name,
+                        'normalized_name': normalize_filename(item.item_type.name)  # Add normalized name
                     },
                     'property_values': [{
                         'property_id': value.property_id,
@@ -315,7 +319,7 @@ def get_update_delete_item(item_id):
     
     if request.method == 'GET':
         # Get files from filesystem
-        type_folder = secure_filename(item.item_type.name.lower())
+        type_folder = normalize_filename(item.item_type.name)
         item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
         files = []
         if os.path.exists(item_folder):
@@ -336,7 +340,8 @@ def get_update_delete_item(item_id):
             } if item.location else None,
             'item_type': {
                 'id': item.item_type.id,
-                'name': item.item_type.name
+                'name': item.item_type.name,
+                'normalized_name': normalize_filename(item.item_type.name)
             },
             'property_values': [{
                 'property_id': value.property_id,
@@ -356,27 +361,14 @@ def get_update_delete_item(item_id):
             file = request.files['image']
             if file.filename != '' and allowed_file(file.filename):
                 # Create type-specific folder
-                type_folder = secure_filename(item.item_type.name.lower())
-                item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
+                type_folder = normalize_filename(item.item_type.name)
+                item_folder = os.path.join(app.config['PICTURES_FOLDER'], 'items', type_folder)
                 os.makedirs(item_folder, exist_ok=True)
                 
-                # Save file with original filename (sanitized)
-                safe_filename = secure_filename(file.filename)
+                # Use item_id as filename with original extension
+                ext = os.path.splitext(file.filename)[1].lower()
+                safe_filename = f"{item_id}{ext}"
                 file_path = os.path.join(item_folder, safe_filename)
-                
-                # If file exists, append number
-                base, ext = os.path.splitext(safe_filename)
-                counter = 1
-                while os.path.exists(file_path):
-                    safe_filename = f"{base}_{counter}{ext}"
-                    file_path = os.path.join(item_folder, safe_filename)
-                    counter += 1
-                
-                # Delete old files in the folder
-                for old_file in os.listdir(item_folder):
-                    old_file_path = os.path.join(item_folder, old_file)
-                    if os.path.isfile(old_file_path):
-                        os.remove(old_file_path)
                 
                 # Save new file
                 file.save(file_path)
@@ -419,7 +411,7 @@ def get_update_delete_item(item_id):
         db.session.commit()
         
         # Get updated files from filesystem
-        type_folder = secure_filename(item.item_type.name.lower())
+        type_folder = normalize_filename(item.item_type.name)
         item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
         files = []
         if os.path.exists(item_folder):
@@ -457,7 +449,7 @@ def get_update_delete_item(item_id):
             return jsonify({'error': 'Insufficient permissions'}), 403
         
         # Delete item's files
-        type_folder = secure_filename(item.item_type.name.lower())
+        type_folder = normalize_filename(item.item_type.name)
         item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
         if os.path.exists(item_folder):
             for filename in os.listdir(item_folder):
@@ -474,13 +466,142 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
+def normalize_filename(filename):
+    """Normalize filename by replacing umlauts and special characters"""
+    replacements = {
+        'ä': 'ae',
+        'ö': 'oe',
+        'ü': 'ue',
+        'ß': 'ss',
+        ' ': '_'
+    }
+    filename = filename.lower()
+    for char, replacement in replacements.items():
+        filename = filename.replace(char, replacement)
+    return secure_filename(filename)
+
 def get_file_info(item_id, type_folder, filename, file_path):
+    """Get file information including the correct relative path"""
+    # Determine if the file is an image based on its extension
+    is_image = any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif'])
+    
+    if is_image:
+        # For images, use {type_folder}/{item_id}.jpg format
+        ext = os.path.splitext(filename)[1].lower()
+        relative_path = f'pictures/items/{type_folder}/{item_id}{ext}'
+    else:
+        # For other files, keep them in uploads with original names
+        relative_path = os.path.join('uploads', 'items', type_folder, str(item_id), filename).replace('\\', '/')
+    
     return {
-        'filename': os.path.join('pictures', 'items', type_folder, item_id, filename).replace('\\', '/'),
+        'filename': relative_path,
         'original_filename': filename,
         'size': os.path.getsize(file_path),
-        'mime_type': mimetypes.guess_type(filename)[0]
+        'mime_type': mimetypes.guess_type(filename)[0],
+        'is_image': is_image
     }
+
+def get_storage_folder(item_id, type_folder, filename):
+    """Determine the correct storage folder based on file type"""
+    is_image = any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif'])
+    if is_image:
+        # For images, store in pictures/items/{type_folder}
+        return os.path.join(app.config['PICTURES_FOLDER'], 'items', type_folder)
+    else:
+        # For other files, keep the full path structure
+        return os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, str(item_id))
+
+@app.route('/api/items/<item_id>/files', methods=['GET'])
+@jwt_required()
+def get_item_files(item_id):
+    if not get_jwt_identity():
+        return jsonify({'error': 'Insufficient permissions'}), 403
+        
+    item = Item.query.get_or_404(item_id)
+    type_folder = normalize_filename(item.item_type.name)
+    item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
+    
+    files = []
+    if os.path.exists(item_folder):
+        for filename in os.listdir(item_folder):
+            file_path = os.path.join(item_folder, filename)
+            if os.path.isfile(file_path):
+                files.append(get_file_info(item_id, type_folder, filename, file_path))
+    
+    return jsonify({'files': files})
+
+@app.route('/api/items/<item_id>/files', methods=['POST'])
+@jwt_required()
+def upload_item_files(item_id):
+    if not get_jwt_identity() or not User.query.get(get_jwt_identity()).has_permission('edit_items'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+        
+    item = Item.query.get_or_404(item_id)
+    
+    if 'files[]' not in request.files:
+        return jsonify({'error': 'No files provided'}), 400
+        
+    files = request.files.getlist('files[]')
+    uploaded_files = []
+    
+    # Create type and item specific folders
+    type_folder = normalize_filename(item.item_type.name)
+    
+    for file in files:
+        if file.filename == '':
+            continue
+            
+        if file and allowed_file(file.filename):
+            # Save file with original filename (sanitized)
+            safe_filename = secure_filename(file.filename)
+            
+            # Get the appropriate storage folder
+            item_folder = get_storage_folder(item_id, type_folder, safe_filename)
+            os.makedirs(item_folder, exist_ok=True)
+            
+            file_path = os.path.join(item_folder, safe_filename)
+            
+            # If file exists, append number
+            base, ext = os.path.splitext(safe_filename)
+            counter = 1
+            while os.path.exists(file_path):
+                safe_filename = f"{base}_{counter}{ext}"
+                file_path = os.path.join(item_folder, safe_filename)
+                counter += 1
+            
+            # Save file
+            file.save(file_path)
+            
+            # Get file info using the helper function
+            file_info = get_file_info(item_id, type_folder, safe_filename, file_path)
+            uploaded_files.append(file_info)
+    
+    return jsonify({'files': uploaded_files})
+
+@app.route('/api/items/<item_id>/files/<path:filename>', methods=['DELETE'])
+@jwt_required()
+def delete_item_file(item_id, filename):
+    if not get_jwt_identity() or not User.query.get(get_jwt_identity()).has_permission('edit_items'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+        
+    item = Item.query.get_or_404(item_id)
+    
+    # Ensure the file is in the correct folder
+    type_folder = normalize_filename(item.item_type.name)
+    item_folder = get_storage_folder(item_id, type_folder, filename)
+    file_path = os.path.join(item_folder, secure_filename(os.path.basename(filename)))
+    
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found'}), 404
+    
+    # Delete physical file
+    os.remove(file_path)
+    
+    # Remove folder if empty
+    if not os.listdir(item_folder):
+        os.rmdir(item_folder)
+    
+    return jsonify({'message': 'File deleted successfully'})
 
 @app.route('/api/items/<item_id>/image', methods=['POST'])
 @jwt_required()
@@ -499,32 +620,20 @@ def upload_item_image(item_id):
         
     if file and allowed_file(file.filename):
         # Create type-specific folder
-        type_folder = secure_filename(item.item_type.name.lower())
-        item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
+        type_folder = normalize_filename(item.item_type.name)
+        item_folder = os.path.join(app.config['PICTURES_FOLDER'], 'items', type_folder)
         os.makedirs(item_folder, exist_ok=True)
         
-        # Save file with original filename (sanitized)
-        safe_filename = secure_filename(file.filename)
+        # Use item_id as filename with original extension
+        ext = os.path.splitext(file.filename)[1].lower()
+        safe_filename = f"{item_id}{ext}"
         file_path = os.path.join(item_folder, safe_filename)
-        
-        # If file exists, append number
-        base, ext = os.path.splitext(safe_filename)
-        counter = 1
-        while os.path.exists(file_path):
-            safe_filename = f"{base}_{counter}{ext}"
-            file_path = os.path.join(item_folder, safe_filename)
-            counter += 1
-        
-        # Delete old files in the folder
-        for old_file in os.listdir(item_folder):
-            old_file_path = os.path.join(item_folder, old_file)
-            if os.path.isfile(old_file_path):
-                os.remove(old_file_path)
         
         # Save new file
         file.save(file_path)
         
-        relative_path = os.path.join('pictures', 'items', type_folder, item_id, safe_filename).replace('\\', '/')
+        # Get file info using the helper function
+        file_info = get_file_info(item_id, type_folder, safe_filename, file_path)
         
         return jsonify({
             'id': item.id,
@@ -546,12 +655,7 @@ def upload_item_image(item_id):
                 'property_type': value.property.property_type,
                 'value': value.get_typed_value()
             } for value in item.property_values],
-            'files': [{
-                'filename': relative_path,
-                'original_filename': safe_filename,
-                'mime_type': file.content_type,
-                'size': os.path.getsize(file_path)
-            }]
+            'files': [file_info]
         })
     
     return jsonify({'error': 'Invalid file type'}), 400
@@ -1010,102 +1114,78 @@ def create_item_type():
         print(f"Error creating item type: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/items/<item_id>/files', methods=['GET'])
+@app.route('/api/items/<item_id>/image', methods=['GET'])
 @jwt_required()
-def get_item_files(item_id):
-    if not get_jwt_identity():
-        return jsonify({'error': 'Insufficient permissions'}), 403
-        
+def get_item_image(item_id):
     item = Item.query.get_or_404(item_id)
-    type_folder = secure_filename(item.item_type.name.lower())
-    item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
+    type_folder = normalize_filename(item.item_type.name)
     
-    files = []
-    if os.path.exists(item_folder):
-        for filename in os.listdir(item_folder):
-            file_path = os.path.join(item_folder, filename)
-            if os.path.isfile(file_path):
-                files.append(get_file_info(item_id, type_folder, filename, file_path))
+    # Check for any image file with the item_id as name
+    image_folder = os.path.join(app.config['PICTURES_FOLDER'], 'items', type_folder)
+    if not os.path.exists(image_folder):
+        return jsonify({'error': 'Image not found'}), 404
+        
+    # Look for any image file with the item_id as name
+    for ext in ['.jpg', '.jpeg', '.png', '.gif']:
+        image_path = os.path.join(image_folder, f"{item_id}{ext}")
+        if os.path.exists(image_path):
+            return send_file(image_path)
     
-    return jsonify({'files': files})
+    return jsonify({'error': 'Image not found'}), 404
 
-@app.route('/api/items/<item_id>/files', methods=['POST'])
+@app.route('/api/items/<item_id>/files/<path:filename>', methods=['GET'])
 @jwt_required()
-def upload_item_files(item_id):
-    if not get_jwt_identity() or not User.query.get(get_jwt_identity()).has_permission('edit_items'):
-        return jsonify({'error': 'Insufficient permissions'}), 403
-        
+def download_item_file(item_id, filename):
     item = Item.query.get_or_404(item_id)
+    type_folder = normalize_filename(item.item_type.name)
     
-    if 'files[]' not in request.files:
-        return jsonify({'error': 'No files provided'}), 400
-        
-    files = request.files.getlist('files[]')
-    uploaded_files = []
-    
-    # Create type and item specific folder
-    type_folder = secure_filename(item.item_type.name.lower())
-    item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
-    os.makedirs(item_folder, exist_ok=True)
-    
-    for file in files:
-        if file.filename == '':
-            continue
-            
-        if file and allowed_file(file.filename):
-            # Save file with original filename (sanitized)
-            safe_filename = secure_filename(file.filename)
-            file_path = os.path.join(item_folder, safe_filename)
-            
-            # If file exists, append number
-            base, ext = os.path.splitext(safe_filename)
-            counter = 1
-            while os.path.exists(file_path):
-                safe_filename = f"{base}_{counter}{ext}"
-                file_path = os.path.join(item_folder, safe_filename)
-                counter += 1
-            
-            # Save file
-            file.save(file_path)
-            
-            relative_path = os.path.join('pictures', 'items', type_folder, item_id, safe_filename).replace('\\', '/')
-            uploaded_files.append({
-                'filename': relative_path,
-                'original_filename': file.filename,
-                'mime_type': file.content_type,
-                'size': os.path.getsize(file_path)
-            })
-    
-    return jsonify({'files': uploaded_files})
-
-@app.route('/api/items/<item_id>/files/<path:filename>', methods=['DELETE'])
-@jwt_required()
-def delete_item_file(item_id, filename):
-    if not get_jwt_identity() or not User.query.get(get_jwt_identity()).has_permission('edit_items'):
-        return jsonify({'error': 'Insufficient permissions'}), 403
-        
-    item = Item.query.get_or_404(item_id)
-    
-    # Ensure the file is in the correct folder
-    type_folder = secure_filename(item.item_type.name.lower())
-    item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
-    file_path = os.path.join(item_folder, secure_filename(os.path.basename(filename)))
+    # Check if it's an image file
+    is_image = any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif'])
+    if is_image:
+        image_folder = os.path.join(app.config['PICTURES_FOLDER'], 'items', type_folder)
+        file_path = os.path.join(image_folder, secure_filename(os.path.basename(filename)))
+    else:
+        item_folder = os.path.join(app.config['UPLOAD_FOLDER'], 'items', type_folder, item_id)
+        file_path = os.path.join(item_folder, secure_filename(os.path.basename(filename)))
     
     if not os.path.exists(file_path):
         return jsonify({'error': 'File not found'}), 404
-    
-    # Delete physical file
-    os.remove(file_path)
-    
-    # Remove folder if empty
-    if not os.listdir(item_folder):
-        os.rmdir(item_folder)
-    
-    return jsonify({'message': 'File deleted successfully'})
+        
+    return send_file(file_path)
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        
+        # Create admin role if it doesn't exist
+        admin_role = Role.query.filter_by(name='admin').first()
+        if not admin_role:
+            admin_role = Role(
+                name='admin',
+                description='Administrator role with full access',
+                permissions=[
+                    'view_items', 'add_items', 'edit_items', 'delete_items',
+                    'manage_users', 'view_reports', 'manage_locations',
+                    'manage_categories', 'manage_tags'
+                ]
+            )
+            db.session.add(admin_role)
+            db.session.commit()
+        
+        # Create admin user if it doesn't exist
+        admin_user = User.query.filter_by(username='admin').first()
+        if not admin_user:
+            admin_user = User(
+                username='admin',
+                email='admin@example.com',
+                is_active=True
+            )
+            admin_user.set_password('admin')  # Default password: admin
+            admin_user.roles.append(admin_role)
+            db.session.add(admin_user)
+            db.session.commit()
+            print("Created admin user with username 'admin' and password 'admin'")
+    
     app.run(
         host=app.config['HOST'],
         port=app.config['PORT'],

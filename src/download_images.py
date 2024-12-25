@@ -3,7 +3,10 @@ import requests
 from app import app, db, ItemType, Item
 from werkzeug.utils import secure_filename
 
-def download_image(url, item_id, item_type_name, filename):
+def download_image(url, item_id, item_type_name):
+
+    filename = f"{item_id}.jpg"
+
     headers = {
         'User-Agent': 'TheaterInventoryApp/1.0'
     }
@@ -74,7 +77,7 @@ def main():
                     image_data['url'],
                     item.id,
                     item.item_type.name,
-                    image_data['filename']
+                    item.id
                 )
         
         print("Done downloading images!")

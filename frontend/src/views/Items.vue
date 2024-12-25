@@ -487,7 +487,8 @@ import { useAuthStore } from '@/stores/auth'
 const auth = useAuthStore()
 const hasPermission = (permission) => auth.hasPermission(permission)
 
-const staticUrl = import.meta.env.VITE_STATIC_URL
+const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000'
+const staticUrl = `${backendUrl}/static`
 
 const items = ref([])
 const locations = ref([])
