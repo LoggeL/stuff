@@ -14,15 +14,21 @@ from werkzeug.utils import secure_filename
 from sqlalchemy import and_
 from sqlalchemy.orm import aliased
 import mimetypes
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__, 
             static_folder=os.path.join(os.path.dirname(os.path.dirname(__file__)), 'static'),
             static_url_path='/static')
 CORS(app)
 
-# JWT configuration
+# Configuration
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key')  # Change in production
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+app.config['PORT'] = int(os.environ.get('FLASK_PORT', 5000))
+app.config['HOST'] = os.environ.get('FLASK_HOST', '127.0.0.1')
 jwt = JWTManager(app)
 
 @jwt.invalid_token_loader
@@ -1100,4 +1106,8 @@ def delete_item_file(item_id, filename):
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-    app.run(debug=True) 
+    app.run(
+        host=app.config['HOST'],
+        port=app.config['PORT'],
+        debug=True
+    ) 
